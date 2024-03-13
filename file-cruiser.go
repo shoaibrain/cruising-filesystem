@@ -1,108 +1,89 @@
-package main // Declares this as the main package (executable program)
-
+package main
 import (
-	"fmt"  // Provides formatted I/O functions
-	"os"   // Provides operating system functions, like file operations
-	"path" // Provides path manipulation functions
-	"sort" // Provides sorting functions
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 )
-
-type Counter struct {
-	dirs  int // Counts directories
-	files int // Counts files
+// FileNode represents a file or directory in the file system.
+type FileNode struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Content  string `json:"content,omitempty"`
+	Children []*FileNode `json:"children,omitempty"`
 }
-
-// Increments directory or file count based on path type
-func (counter *Counter) index(path string) {
-	stat, _ := os.Stat(path)
-	if stat.IsDir() {
-		counter.dirs += 1
-	} else {
-		counter.files += 1
-	}
-}
-
-// Formats and returns a string with directory and file counts
-func (counter *Counter) output() string {
-	return fmt.Sprintf("\n%d directories, %d files", counter.dirs, counter.files)
-}
-
-// Returns a sorted list of subdirectory names within a base directory
-func dirnamesFrom(base string) []string {
-	file, err := os.Open(base) // Open the base directory
+// traverseDirectory recursively traverses the given directory and builds the file tree structure.
+func traverseDirectory(dirPath string) (*FileNode, error) {
+	fileInfo, err := os.Stat(dirPath)
 	if err != nil {
-		fmt.Println(err) // Handle errors more gracefully
+		return nil, err
 	}
-	names, _ := file.Readdirnames(0) // Read subdirectory names
-	file.Close()
-
-	sort.Strings(names) // Sort names alphabetically
-	return names
-}
-
-// Todo: skip executable file, and directories that starts with .
-func jsonBuilder(base string, prefix string) string {
-	names := dirnamesFrom(base)
-
-	// Determine the type (file or directory)
-	fileInfo, err := os.Stat(base)
-	if err != nil {
-		fmt.Println(err) // Handle errors appropriately
-		return ""
+	node := &FileNode{
+		Name: filepath.Base(dirPath),
+		Type: "file",
 	}
-	nodeType := "file"
 	if fileInfo.IsDir() {
-		nodeType = "directory"
-	}
-
-	json := "{\n" + prefix + "\"name\": \"" + path.Base(base) + "\",\n" + prefix + "\"type\": \"" + nodeType + "\",\n" + prefix + "\"children\": ["
-
-	for index, name := range names {
-		if name[0] == '.' {
-			continue
+		node.Type = "directory"
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			return nil, err
 		}
-		subpath := path.Join(base, name)
-
-		if index == len(names)-1 {
-			json += "\n" + prefix + "    " + jsonBuilder(subpath, prefix+"    ")
-		} else {
-			json += "\n" + prefix + "    " + jsonBuilder(subpath, prefix+"    ") + ","
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].Name() < entries[j].Name()
+		})
+		for _, entry := range entries {
+			if shouldSkipEntry(entry.Name()) {
+				continue
+			}
+			entryPath := filepath.Join(dirPath, entry.Name())
+			child, err := traverseDirectory(entryPath)
+			if err != nil {
+				return nil, err
+			}
+			node.Children = append(node.Children, child)
+		}
+	} else {
+		// If it's a file, read the contents and store them in the FileNode
+		content, err := ioutil.ReadFile(dirPath)
+		if err != nil {
+			return nil, err
+		}
+		// Skip the content if the file is named "file-cruiser"
+		// which is an executable file
+		if filepath.Base(dirPath) != "file-cruiser" {
+			node.Content = string(content)
 		}
 	}
-
-	return json + "\n" + prefix + "]}\n"
+	return node, nil
 }
-
-func writeJSONToFile(json string) error {
-	filename := "self.json"
-	file, err := os.Create(filename)
-	if err != nil {
-		return err // Handle errors appropriately
-	}
-	defer file.Close()
-
-	_, err = file.WriteString(json)
+// shouldSkipEntry returns true if the given entry name should be skipped
+func shouldSkipEntry(name string) bool {
+	return strings.HasPrefix(name, ".")
+}
+// writeJSONToFile writes the given file tree as JSON to the specified file path.
+func writeJSONToFile(filePath string, root *FileNode) error {
+	jsonData, err := json.MarshalIndent(root, "", "    ")
 	if err != nil {
 		return err
 	}
-
-	return nil
+	return os.WriteFile(filePath, jsonData, 0644)
 }
-
 func main() {
-	var directory string
+	dirPath := "."
 	if len(os.Args) > 1 {
-		directory = os.Args[1] // Use provided directory argument
-	} else {
-		directory = "." // Default to current directory
+		dirPath = os.Args[1]
 	}
-
-	json := jsonBuilder(directory, "")
-
-	err := writeJSONToFile(json)
+	root, err := traverseDirectory(dirPath)
 	if err != nil {
-		fmt.Println(err)
-	} else {
-		fmt.Println("JSON written to self.json")
+		fmt.Println("Error:", err)
+		return
+	}
+	err = writeJSONToFile("file-tree.json", root)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
 	}
 }
